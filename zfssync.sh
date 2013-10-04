@@ -1,5 +1,6 @@
 #!/bin/bash
 # zfssync.sh - ZFS replication script
+# WARNING - The code quality is mediocre at best, use at your own responibility!
 # Written by Christer Jonassen - cjdesigns.no
 # Licensed under CC BY-NC-SA 3.0 (check LICENCE file or http://creativecommons.org/licenses/by-nc-sa/3.0/ for details.)
 # Made possible by the wise *nix and BSD people sharing their knowledge online
@@ -9,6 +10,7 @@
 # Variables
 APPVERSION="1.0"
 CONFIGFILE="test.cfg"
+STATUS=""$DEF"Idle"
 
 # Pretty colors for the terminal:
 DEF="\x1b[0m"
@@ -47,6 +49,52 @@ timeupdate() # Sets current time into different variables. Used for timestamping
 	HOUR=$(date +"%H") 					# 15
 	MINUTE=$(date +"%M") 				# 34
 	SEC=$(date +"%S") 					# 56
+
+	#if [ -f yesterday.sh ] ; then ut "Neccessary workaround script \"yesteday.sh\" found"; else status error; ut "Neccessary workaround script \"yesteday.sh\" NOT found!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+	#if [ -f yesterday.sh ] ; then continue; else echo  "$(date +"%Y-%m-%d %R:%S") yesterday.sh not found, aborting" >>zsyncdebug.log; echo "timeupdate() error: Neccessary workaround script \"yesteday.sh\" NOT found!"; echo "zfssync.sh will now terminate."; sleep 2; exit; fi
+	YESTERDAY=$(./yesterday.sh)			# 20130411 (Dirty workaround, since FreeNAS does not have GNU/date. Script found here: http://www.digitalinternals.com/131/20090705/calculate-yesterday-date-in-unix-shell-script/)
+}
+
+
+ut()
+{
+	echo -e ""$LIGHTGRAY"["$DEF""$RED"zs"$LIGHTGRAY"]"$DEF"[$STATUS][$(date +"%a %d %b, %R:%S")]"$LIGHTYELLOW":"$DEF" $1"
+	logg "$1"
+
+}
+
+status()
+{
+	case "$1" in
+		idle)
+		STATUS=""$DEF"Idle"
+		CLEARTEXTSTATUS="Idle"
+		RHOST="<idle>"
+		;;
+
+		busy)
+		STATUS=""$YELLOW"Busy"$DEF""
+		CLEARTEXTSTATUS="Busy"
+		;;
+
+		sync)
+		STATUS=""$LIGHTGREEN"Sync"$DEF""
+		CLEARTEXTSTATUS="Sync"
+		;;
+
+		error)
+		STATUS=""$LIGHTRED"HALT"$DEF""
+		CLEARTEXTSTATUS="HALT"
+		;;
+	esac
+	logg "Status set to $1"
+}
+
+logg()
+{
+timeupdate
+		echo "$MCSTAMP [$CLEARTEXTSTATUS][$RHOST] $1">>zsyncsys.log
+		echo "$MCSTAMP [$CLEARTEXTSTATUS][$RHOST] $1">>zsyncdebug.log
 }
 
 splash() # display logo
@@ -71,30 +119,126 @@ splash() # display logo
 
 checkping() # Check if remote system is pingable
 {
-	echo -e "   Attempting ping..."
+	ut "   Attempting ping..."
 	ping -q -c 4 -W3 $RHOST&> /dev/null # Ping remote host 4 times, with a timeout of 3 seconds
 		if [ $? == 0 ]; then
-			pingcheck="OK"
-			echo -e "     -> Target is "$GREEN"pingable"$DEF"!"
+			PINGCHECK="OK"
+			ut "     -> Target is "$GREEN"pingable"$DEF"!"
 		else
-			pingcheck="ERR"
-			echo -e "     -> Target is "$RED"not pingable"$DEF""
-			echo Abort!
+			PINGCHECK="ERR"
+			status error
+			ut "     -> Target is "$RED"not pingable"$DEF""
+			ut "We can not proceed."
+			ut "zfssync.sh will now terminate."
+			sleep 2
+			exit
 		fi
 }
 
 checkssh()
 {
-	echo -e "   Attempting SSH connection..."
-	ssh -i $KEY -p $PORT -q $RHOST exit
+	ut "   Attempting SSH connection..."
+	ssh -n -i $KEY -p $PORT -q $RHOST exit
 		if [ $? == 0 ]; then
-			sshcheck="OK"
-			echo -e "     -> SSH test connection "$GREEN"successful"$DEF"!"
+			SSHCHECK="OK"
+			ut "     -> SSH test connection "$GREEN"successful"$DEF"!"
 		else
-			sshcheck="ERR"
-			echo -e "     -> SSH test connection "$RED"unsuccessful"$DEF""
-			echo Abort!
+			SSHCHECK="ERR"
+			status error
+			ut "     -> SSH test connection "$RED"unsuccessful"$DEF""
+			ut "We can not proceed."
+			ut "zfssync.sh will now terminate."
+			sleep 2
+			exit
 		fi
+}
+
+idlewait()
+{
+	ut "Checking if zfssleep.txt is present.."
+	if [ -f zfssleep.txt ]; then status idle; ut "Entering deep sleep (zfssleep.txt detected)"; fi
+	
+	while [ -f zfssleep.txt ]
+	do
+		COUNTDOWN=1800
+		ut "Waiting until told otherwise. Re-checking for go-signal in "$LIGHTGRAY"$COUNTDOWN"$DEF" second(s)"
+		until [ $COUNTDOWN == 0 ]; do
+			sleep 1
+			COUNTDOWN=$(( COUNTDOWN - 1 ))
+		done
+	done
+	ut "zfssleep.txt not detected, re-initializing zfssync"
+}
+
+
+zfsrep()
+{
+	ut
+	status busy
+	ut ""$YELLOW"zfssync init..."$DEF""
+	ut 
+	while read CURRENTDATASET # The script will repeat below until CTRL-C is pressed
+		do
+			status busy
+			timeupdate
+			ut "Preparing next replication..."
+			# Blank variables before we read CURRENTDATASET
+			DESCRIPTION=
+			SNAPSHOT=
+			PREVSNAPSHOT=
+			KEY=
+			PORT=
+			RHOST=
+			TARGETFS=
+			ut "Reading configuration..."
+			ut "     -> "$CYAN"$CURRENTDATASET"$DEF""
+			source $CURRENTDATASET
+			if [ -z "$DESCRIPTION" ]; then status error; ut "DESCRIPTION not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$PREVSNAPSHOT" ]; then status error; ut "PREVSNAPSHOT not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$SNAPSHOT" ]; then status error; ut "SNAPSHOT not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$KEY" ]; then status error; ut "KEY not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$PORT" ]; then status error; ut "PORT not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$RHOST" ]; then status error; ut "RHOST not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			if [ -z "$TARGETFS" ]; then status error; ut "TARGETFS not set, please check config!"; ut "zfssync.sh will now terminate."; sleep 2; exit; fi
+			ut
+			ut "Loaded config:"
+			ut "   Description:                  "$CYAN"$DESCRIPTION"$DEF""
+			ut "   Previous snapshot:            "$CYAN"$PREVSNAPSHOT"$DEF""
+			ut "   Snapshot that will be pushed: "$CYAN"$SNAPSHOT"$DEF""
+			ut "   Authentication key:           "$CYAN"$KEY"$DEF""
+			ut "   Port used for SSH connection: "$CYAN"$PORT"$DEF""
+			ut "   Remote system:                "$CYAN"$RHOST"$DEF""
+			ut "   Target filesystem:            "$CYAN"$TARGETFS"$DEF""
+			ut
+			ut "Checking remote system:"
+			checkping
+			ut
+			checkssh
+			ut
+			status sync
+			ut "Ready for ZFS replication! - 3"
+			sleep 1
+			ut "Ready for ZFS replication! - 2"
+			sleep 1
+			ut "Ready for ZFS replication! - 1"
+			sleep 1
+			ut "GO!"
+			
+			ut "zfs send -i $PREVSNAPSHOT $SNAPSHOT | dd | dd obs=1m | ssh -i $KEY -p $PORT $RHOST zfs receive $TARGETFS"
+			zfs send -i $PREVSNAPSHOT $SNAPSHOT | dd | dd obs=1m | ssh -i $KEY -p $PORT $RHOST zfs receive $TARGETFS
+			
+			ut
+			ut "### Finished current dataset ($DESCRIPTION)"
+			status busy
+			ut
+			ut
+	done < cfg.lst
+
+	ut "Looks like we are done for now, creating zfssleep.txt"
+	echo "Done for now.">zfssleep.txt
+	ut "##### Finished syncing all datasets!"
+	status idle
+	ut
 }
 
 # FUNCTIONS END:
@@ -103,33 +247,19 @@ checkssh()
 
 # The actual runscript:
 
-#trap "{ reset; clear;echo zfssync $APPVERSION terminated at `date`; exit; }" SIGINT SIGTERM EXIT # Set trap for catching Ctrl-C and kills, so we can reset terminal upon exit
+trap "{ echo zfssync $APPVERSION terminated at `date`; exit; }" SIGINT SIGTERM EXIT # Set trap for catching Ctrl-C and kills, so we can reset terminal upon exit
 
 splash
 clear
 
 
-#while true # The script will repeat below until CTRL-C is pressed
-#	do
-		timeupdate
-		echo -e ""$YELLOW"zfssync init..."$DEF""
-		echo
-		echo -e "Reading config..."
-		source test.cfg
-		echo
-		echo -e "Loaded settings:"
-		echo -e "   Snapshot that will be pushed: "$CYAN"$SNAPSHOT"$DEF""
-		echo -e "   Authentication key: "$CYAN"$KEY"$DEF""
-		echo -e "   Port used for SSH connection: "$CYAN"$PORT"$DEF""
-		echo -e "   Remote system: "$CYAN"$RHOST"$DEF""
-		echo -e "   Target filesystem: "$CYAN"$TARGETFS"$DEF""
-		echo
-		echo -e "Checking remote system:"
-		checkping
-		echo
-		checkssh
-		echo
-		echo Ready for ZFS replication!
-		echo
-		echo "zfs send $SNAPSHOT | ssh -i $KEY -p $PORT $RHOST zfs receive -F $TARGETFS"
-#	done
+
+
+
+while true
+	do
+		idlewait
+		zfsrep
+	done
+status error
+ut "zfsync halt"
